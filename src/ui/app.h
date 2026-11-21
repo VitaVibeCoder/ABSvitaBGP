@@ -31,6 +31,7 @@ struct View {
 extern Config g_cfg;
 void app_save_config(void);
 const char *app_data_dir(void);
+void app_record_bg_progress(const char *item_id, double pos_s, double dur_s);
 
 void app_init(void);
 void app_update(const Input *in, float dt);

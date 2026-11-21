@@ -9,6 +9,7 @@
 
 #include "abs_client.h"
 #include "app.h"
+#include "bgmusic.h"
 #include "covers.h"
 #include "dbg.h"
 #include "downloads.h"
@@ -17,6 +18,7 @@
 #include "ime.h"
 #include "input.h"
 #include "libmodel.h"
+#include "osal.h"
 #include "player.h"
 #include "progress_queue.h"
 #include "strutil.h"
@@ -52,6 +54,24 @@ static int64_t ux0_free(const char *dir) {
 
 static void save_queue(void) { pq_save(&g_pq, DATA "/progress_queue.json"); }
 
+void app_record_bg_progress(const char *item_id, double pos_s, double dur_s) {
+    if (!item_id || !item_id[0] || pos_s <= 0) return;
+    QEntry e;
+    memset(&e, 0, sizeof e);
+    str_copy(e.item_id, sizeof e.item_id, item_id);
+    e.current_time = pos_s;
+    e.duration = dur_s;
+    bool known;
+    long long off = http_clock_offset(&known);
+    e.updated_ms = wall_ms() + (known ? off : 0);
+    e.finished = dur_s > 0 && pos_s >= dur_s - 1;
+    e.pending = true;
+    pq_put(&g_pq, &e);
+    save_queue();
+    player_flush_queue();
+    dbg("bgmusic: saved progress id=%s pos=%.1f/%.1f", item_id, pos_s, dur_s);
+}
+
 static void make_device_id(void) {
     if (g_cfg.device_id[0]) return;
     SceRtcTick t;
@@ -84,6 +104,13 @@ int main(void) {
     if (engine_init(&vita_sink, absc_stream_auth) != 0) dbg("engine_init failed");
     dl_init(DATA "/books", ux0_free);
     player_init(&g_cfg, &g_pq, save_queue, sys_model());
+    bgmusic_init(DATA);
+    {
+        char bg_id[40];
+        double bg_pos = 0, bg_dur = 0;
+        if (bgmusic_reconcile(bg_id, sizeof bg_id, &bg_pos, &bg_dur))
+            app_record_bg_progress(bg_id, bg_pos, bg_dur);
+    }
     lib_init();
 
     vita2d_init_advanced_with_msaa(4 * 1024 * 1024, SCE_GXM_MULTISAMPLE_4X);
@@ -131,6 +158,8 @@ int main(void) {
     dbg("shutdown: player done");
     engine_exit();
     dbg("shutdown: engine done");
+    bgmusic_shutdown();
+    dbg("shutdown: bgmusic done");
     /* stop the network threads before the network goes away under them */
     http_abort_all();
     dl_exit();

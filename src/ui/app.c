@@ -1,4 +1,5 @@
 #include "app.h"
+#include "bgmusic.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -184,6 +185,14 @@ void app_open_book(int lib_index) { app_push(view_book_new(lib_book(lib_index)))
 void app_open_book_summary(const BookSummary *b) { app_push(view_book_new(b)); }
 
 void app_play(const BookSummary *b, double start) {
+    if (bgmusic_active()) {
+        char bg_id[40];
+        double bg_pos = 0, bg_dur = 0;
+        if (bgmusic_stop(bg_id, sizeof bg_id, &bg_pos, &bg_dur)) {
+            app_record_bg_progress(bg_id, bg_pos, bg_dur);
+            if (start < 0 && !strcmp(bg_id, b->id)) start = bg_pos;
+        }
+    }
     player_open(b, start);
     app_open_player();
 }

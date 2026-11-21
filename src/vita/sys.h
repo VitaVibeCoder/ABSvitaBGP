@@ -18,5 +18,7 @@ bool sys_quit_requested(void);   /* the system asked the app to close */
 bool sys_visible(void);          /* display on and the app in front: worth drawing */
 const char *sys_model(void);
 int sys_language(void);
+void sys_acquire_bgm_port(void);
+void sys_release_bgm_port(void);
 
 #endif

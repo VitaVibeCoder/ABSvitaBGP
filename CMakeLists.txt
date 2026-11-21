@@ -55,7 +55,7 @@ if(AUTOPILOT)
 endif()
 target_include_directories(${PROJECT_NAME} PRIVATE
   /opt/curl-mbed/include
-  src/core src/net src/ui src/vita vendor/cjson vendor/sonic vendor/helix-aac vendor/stb)
+  src/core src/net src/ui src/vita vendor/cjson vendor/sonic vendor/helix-aac vendor/stb vendor/libSceMusic)
 
 target_link_libraries(${PROJECT_NAME}
   vita2d freetype png jpeg bz2 z
@@ -65,6 +65,7 @@ target_link_libraries(${PROJECT_NAME}
   SceDisplay_stub SceGxm_stub SceCtrl_stub SceTouch_stub SceAudio_stub
   ScePower_stub SceSysmodule_stub SceCommonDialog_stub SceAppUtil_stub SceAppMgr_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub SceRtc_stub SceIme_stub
+  ${CMAKE_CURRENT_SOURCE_DIR}/vendor/libSceMusic/libSceMusic_stub_weak.a
   SceKernelThreadMgr_stub SceKernelModulemgr_stub SceIofilemgr_stub SceProcessmgr_stub SceLibKernel_stub SceSysmem_stub
 )
 
@@ -78,4 +79,5 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
   FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
   FILE assets/fonts/Manrope-500.ttf assets/Manrope-500.ttf
   FILE assets/fonts/Manrope-700.ttf assets/Manrope-700.ttf
+  FILE vendor/libSceMusic/libSceMusic.suprx module/libSceMusic.suprx
 )

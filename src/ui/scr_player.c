@@ -6,6 +6,7 @@
 
 #include <vita2d.h>
 
+#include "bgmusic.h"
 #include "covers.h"
 #include "downloads.h"
 #include "libmodel.h"
@@ -27,7 +28,7 @@
 #define PILL_H 42.0f
 
 enum { K_BACK, K_PREV, K_PLAY, K_NEXT, K_FWD };
-enum { P_SPEED, P_SLEEP, P_CHAPTERS, P_DOWNLOAD, P_INFO, P_COUNT };
+enum { P_SPEED, P_SLEEP, P_CHAPTERS, P_DOWNLOAD, P_BGM, P_INFO, P_COUNT };
 
 static struct {
     int row, col[2];
@@ -55,7 +56,16 @@ static void do_control(int k) {
     switch (k) {
     case K_BACK: player_skip(-g_cfg.skip_back); break;
     case K_PREV: player_chapter(-1); break;
-    case K_PLAY: player_toggle(); break;
+    case K_PLAY:
+        if (bgmusic_active()) {
+            char bg_id[40];
+            double bg_pos = 0, bg_dur = 0;
+            if (bgmusic_stop(bg_id, sizeof bg_id, &bg_pos, &bg_dur))
+                app_record_bg_progress(bg_id, bg_pos, bg_dur);
+            app_toast("Stopped System Music");
+        }
+        player_toggle();
+        break;
     case K_NEXT: player_chapter(1); break;
     case K_FWD: player_skip(g_cfg.skip_fwd); break;
     }
@@ -73,6 +83,32 @@ static void do_pill(int p) {
         if (st == DL_QUEUED || st == DL_ACTIVE) dl_pause(b->id);
         else if (st == DL_DONE) app_toast("Saved on the memory card");
         else if (dl_start(b->id) != 0) app_toast("Couldn't start the download");
+        break;
+    }
+    case P_BGM: {
+        const BookDetail *b = player_book();
+        if (!b) break;
+        if (bgmusic_active()) {
+            char bg_id[40];
+            double bg_pos = 0, bg_dur = 0;
+            if (bgmusic_stop(bg_id, sizeof bg_id, &bg_pos, &bg_dur))
+                app_record_bg_progress(bg_id, bg_pos, bg_dur);
+            app_toast("Stopped System Music");
+            break;
+        }
+        if (!dl_is_done(b->id) || b->ntracks <= 0) {
+            app_toast("Download book first for BG play");
+            break;
+        }
+        char path[512], err[96];
+        dl_track_path(b->id, 0, b->tracks[0].ext, path, sizeof path);
+        double pos = player_position();
+        player_pause();
+        engine_stop();
+        if (bgmusic_start(b->id, path, pos, b->duration, err, sizeof err) == 0)
+            app_toast("Playing in System Music (safe to launch a game)");
+        else
+            app_toast(err[0] ? err : "System Music handoff failed");
         break;
     }
     case P_INFO: {
@@ -157,7 +193,7 @@ void player_screen_update(const Input *in, float dt) {
         return;
     }
     if (in->down & (B_BACK | B_START)) { app_close_player(); return; }
-    if (in->down & B_SQUARE) player_toggle();
+    if (in->down & B_SQUARE) do_control(K_PLAY);
     if (in->repeat & B_L) player_skip(-g_cfg.skip_back);
     if (in->repeat & B_R) player_skip(g_cfg.skip_fwd);
     if (in->down & B_TRIANGLE) open_chapters();
@@ -165,9 +201,8 @@ void player_screen_update(const Input *in, float dt) {
     int n = S.row == 0 ? 5 : P_COUNT;
     if (in->repeat & B_LEFT && S.col[S.row] > 0) S.col[S.row]--;
     if (in->repeat & B_RIGHT && S.col[S.row] + 1 < n) S.col[S.row]++;
-    /* both rows have five items: up/down keep the column */
     if (in->repeat & B_DOWN && S.row == 0) { S.row = 1; S.col[1] = S.col[0]; }
-    if (in->repeat & B_UP && S.row == 1) { S.row = 0; S.col[0] = S.col[1]; }
+    if (in->repeat & B_UP && S.row == 1) { S.row = 0; S.col[0] = S.col[1] < 5 ? S.col[1] : 4; }
     if (in->down & B_OK) {
         if (S.row == 0) do_control(S.col[0]);
         else do_pill(S.col[1]);
@@ -329,9 +364,9 @@ void player_screen_draw(void) {
     control(K_NEXT, cx + 96, 30, IC_NEXT, NULL);
     control(K_FWD, cx + 192, 30, IC_FWD, nf);
 
-    /* options: three pills, then download and book-details icons */
-    float ib = PILL_H, gap = 12;
-    float pw = (RW - 2 * ib - 4 * gap) / 3;
+    /* options: three pills, then download, BG music, and book-details icons */
+    float ib = PILL_H, gap = 10;
+    float pw = (RW - 3 * ib - 5 * gap) / 3;
     char sp[16], sl[32];
     snprintf(sp, sizeof sp, "%g\xC3\x97", player_speed());
     const SleepTimer *slp = player_sleep();
@@ -345,7 +380,8 @@ void player_screen_draw(void) {
     int dl_icon = ds == DL_DONE ? IC_CHECK : ds == DL_QUEUED ? IC_CLOCK : ds == DL_ACTIVE ? IC_PAUSE : IC_DOWNLOAD;
     uint32_t dl_c = ds == DL_DONE ? C_ACCENT : ds == DL_FAILED ? C_ERROR : C_TEXT;
     icon_button(P_DOWNLOAD, RX + 3 * (pw + gap), dl_icon, dl_c, ds == DL_ACTIVE || ds == DL_PAUSED ? dfrac : -1);
-    icon_button(P_INFO, RX + 3 * (pw + gap) + ib + gap, IC_INFO, C_TEXT, -1);
+    icon_button(P_BGM, RX + 3 * (pw + gap) + ib + gap, IC_HEADPHONES, bgmusic_active() ? C_ACCENT : C_TEXT, -1);
+    icon_button(P_INFO, RX + 3 * (pw + gap) + 2 * (ib + gap), IC_INFO, C_TEXT, -1);
 
     if (S.chapters) {
         draw_chapters();
@@ -356,6 +392,8 @@ void player_screen_draw(void) {
         snprintf(t, sizeof t, ds == DL_NONE ? "Download" : ds == DL_ACTIVE ? "Pause download (%d%%)" :
                  ds == DL_QUEUED ? "Pause download" : ds == DL_DONE ? "Saved" : "Resume download", (int)(dfrac * 100));
         hint(g_ok(), t);
+    } else if (S.row == 1 && S.col[1] == P_BGM) {
+        hint(g_ok(), bgmusic_active() ? "Stop BG music" : "Play in BG (games)");
     } else if (S.row == 1 && S.col[1] == P_INFO) {
         hint(g_ok(), "Book details");
     }

@@ -14,7 +14,7 @@
 
 #include "dbg.h"
 
-static bool g_cross = true, g_screen = true;
+static bool g_cross = true, g_screen = true, g_bgm_port = false;
 static int g_lang = SCE_SYSTEM_PARAM_LANG_ENGLISH_US;
 static void *g_net_mem;
 static volatile bool g_awake, g_fg = true;
@@ -83,16 +83,28 @@ int sys_init(void) {
     if (r < 0) dbg("sceNetCtlInit %08x", (unsigned)r);
 
     /* the BGM port keeps our audio running with the display off (as ElevenMPV does) */
-    r = sceAppMgrAcquireBgmPort();
-    if (r < 0) dbg("sceAppMgrAcquireBgmPort %08x", (unsigned)r);
+    sys_acquire_bgm_port();
     g_last_active = now_s();
     SceUID th = sceKernelCreateThread("power_tick", tick_thread, 0x10000100, 0x4000, 0, 0, NULL);
     if (th >= 0) sceKernelStartThread(th, 0, NULL);
     return 0;
 }
 
-void sys_exit(void) {
+void sys_acquire_bgm_port(void) {
+    if (g_bgm_port) return;
+    int r = sceAppMgrAcquireBgmPort();
+    if (r < 0) dbg("sceAppMgrAcquireBgmPort %08x", (unsigned)r);
+    else g_bgm_port = true;
+}
+
+void sys_release_bgm_port(void) {
+    if (!g_bgm_port) return;
     sceAppMgrReleaseBgmPort();
+    g_bgm_port = false;
+}
+
+void sys_exit(void) {
+    sys_release_bgm_port();
     sceNetCtlTerm();
     sceNetTerm();
     sceSysmoduleUnloadModule(SCE_SYSMODULE_NET);
