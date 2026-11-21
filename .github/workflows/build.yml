@@ -42,19 +42,23 @@ jobs:
           fi
       - name: Build toolchain image (VitaSDK + libcurl/mbedTLS)
         run: docker build -t absvita-build docker
-      - name: Build VPK
+      - name: Build VPK and QuickMenuReborn plugin
         run: |
           docker run --rm -v "$PWD":/src -w /src absvita-build sh -c \
             'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAPP_VERSION=${{ steps.ver.outputs.version }} && cmake --build build -j"$(nproc)"'
       - uses: actions/upload-artifact@v4
         with:
           name: ABSvita-${{ steps.ver.outputs.version }}
-          path: build/ABSvita.vpk
+          path: |
+            build/ABSvita.vpk
+            build/absvita_qm.suprx
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/ABSvita.vpk
+          files: |
+            build/ABSvita.vpk
+            build/absvita_qm.suprx
           generate_release_notes: true
           body: |
             ## Install

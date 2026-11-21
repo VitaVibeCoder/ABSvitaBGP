@@ -81,3 +81,24 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
   FILE assets/fonts/Manrope-700.ttf assets/Manrope-700.ttf
   FILE vendor/libSceMusic/libSceMusic.suprx module/libSceMusic.suprx
 )
+
+# QuickMenuReborn plugin (absvita_qm.suprx) for in-game Play/Pause and +/-15s controls
+add_executable(absvita_qm plugin/absvita_qm.c)
+target_include_directories(absvita_qm PRIVATE
+  vendor/quickmenureborn
+  vendor/libSceMusic
+)
+target_compile_options(absvita_qm PRIVATE -fno-builtin)
+target_link_options(absvita_qm PRIVATE -nostdlib)
+target_link_libraries(absvita_qm
+  ${CMAKE_CURRENT_SOURCE_DIR}/vendor/quickmenureborn/libQuickMenuReborn_stub_weak.a
+  ${CMAKE_CURRENT_SOURCE_DIR}/vendor/libSceMusic/libSceMusic_stub_weak.a
+  SceLibKernel_stub
+  SceKernelThreadMgr_stub
+  SceKernelModulemgr_stub
+  SceIofilemgr_stub
+)
+vita_create_self(absvita_qm.suprx absvita_qm
+  CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/plugin/absvita_qm.yml
+  UNSAFE
+)

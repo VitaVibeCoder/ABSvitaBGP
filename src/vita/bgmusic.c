@@ -19,11 +19,12 @@ static struct {
     bool svc_inited;
     bool active;
     char state_path[256];
+    char pos_path[256];
     char item_id[40];
     double duration;
     char orig_path[512];
     char play_path[512];
-} G = {-1, false, false, {0}, {0}, 0, {0}, {0}};
+} G = {-1, false, false, {0}, {0}, {0}, 0, {0}, {0}};
 
 static bool ends_with_ci(const char *s, const char *suf) {
     size_t ls = strlen(s), lf = strlen(suf);
@@ -49,6 +50,7 @@ static void clear_state(void) {
     G.play_path[0] = 0;
     G.active = false;
     if (G.state_path[0]) remove(G.state_path);
+    if (G.pos_path[0]) remove(G.pos_path);
 }
 
 static void trim_nl(char *s) {
@@ -75,6 +77,28 @@ static bool load_state(void) {
     return G.item_id[0] != 0 && G.play_path[0] != 0;
 }
 
+/* Read paused/skipped position persisted by absvita_qm.suprx */
+static uint32_t load_plugin_pos_ms(void) {
+    if (!G.pos_path[0]) return 0;
+    FILE *f = fopen(G.pos_path, "rb");
+    if (!f) return 0;
+    char ms_line[64];
+    char uri_line[512];
+    uri_line[0] = 0;
+    if (!fgets(ms_line, sizeof ms_line, f)) { fclose(f); return 0; }
+    (void)fgets(uri_line, sizeof uri_line, f);
+    fclose(f);
+    trim_nl(ms_line);
+    trim_nl(uri_line);
+    if (uri_line[0] &&
+        strcmp(uri_line, G.play_path) != 0 &&
+        (!G.item_id[0] || strstr(uri_line, G.item_id) == NULL)) {
+        return 0;
+    }
+    unsigned long ms = strtoul(ms_line, NULL, 10);
+    return (uint32_t)ms;
+}
+
 static void restore_renamed_file(void) {
     if (G.orig_path[0] && G.play_path[0] && strcmp(G.orig_path, G.play_path) != 0) {
         int r = rename(G.play_path, G.orig_path);
@@ -99,6 +123,7 @@ static int ensure_service(void) {
 
 void bgmusic_init(const char *data_dir) {
     snprintf(G.state_path, sizeof G.state_path, "%s/bgmusic.txt", data_dir);
+    snprintf(G.pos_path, sizeof G.pos_path, "%s/bgmusic_pos.txt", data_dir);
     G.mod = sceKernelLoadStartModule(BGM_MOD_PATH, 0, NULL, 0, NULL, NULL);
     dbg("bgmusic: load %s -> %08x", BGM_MOD_PATH, (unsigned)G.mod);
     if (load_state()) {
@@ -121,22 +146,35 @@ bool bgmusic_reconcile(char *item_id, size_t id_sz, double *pos_s, double *dur_s
     dbg("bgmusic: reconcile urc=%08x uri='%s' src=%08x state=%d pos=%ums dur=%ums",
         (unsigned)urc, uri, (unsigned)src, ext.currentState, ext.currentTimeMs, ext.durationMs);
 
-    if (src != 0) return false;
-
+    uint32_t plugin_ms = load_plugin_pos_ms();
     bool uri_matches = (urc == 0 && uri[0] &&
                         (strcmp(uri, G.play_path) == 0 || strstr(uri, G.item_id) != NULL));
+
     if (!uri_matches) {
+        if (plugin_ms > 0) {
+            /* Paused via QuickMenuReborn plugin and MusicCore cleared its URI */
+            if (item_id && id_sz) str_copy(item_id, id_sz, G.item_id);
+            if (pos_s) *pos_s = plugin_ms / 1000.0;
+            if (dur_s) *dur_s = G.duration;
+            G.active = false;
+            return true;
+        }
         /* SceShell moved on to another track or cleared its URI */
         restore_renamed_file();
         clear_state();
         return false;
     }
 
+    if (src != 0 && plugin_ms == 0) return false;
     if (ext.currentState != SCE_MUSIC_COMMAND_PLAY) G.active = false;
-    if (ext.currentTimeMs == 0) return false;
+
+    uint32_t best_ms = (ext.currentState == SCE_MUSIC_COMMAND_PLAY && ext.currentTimeMs > 0)
+                           ? ext.currentTimeMs
+                           : (ext.currentTimeMs > 0 ? ext.currentTimeMs : plugin_ms);
+    if (best_ms == 0) return false;
 
     if (item_id && id_sz) str_copy(item_id, id_sz, G.item_id);
-    if (pos_s) *pos_s = ext.currentTimeMs / 1000.0;
+    if (pos_s) *pos_s = best_ms / 1000.0;
     if (dur_s) *dur_s = G.duration > 0 ? G.duration : (ext.durationMs / 1000.0);
     return true;
 }
@@ -232,6 +270,7 @@ int bgmusic_start(const char *item_id, const char *track_path, double pos_s, dou
     str_copy(G.orig_path, sizeof G.orig_path, track_path);
     str_copy(G.play_path, sizeof G.play_path, play_path);
     G.active = true;
+    if (G.pos_path[0]) remove(G.pos_path);
     save_state();
     return 0;
 }
