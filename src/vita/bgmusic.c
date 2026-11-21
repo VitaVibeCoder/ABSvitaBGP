@@ -121,6 +121,39 @@ static int ensure_service(void) {
     return 0;
 }
 
+/* Wait for MusicCore to finish opening large .m4b files before issuing SEEK */
+static void wait_and_seek(uint32_t seek_ms) {
+    SceMusicPlayerServicePlayStatusExtension ext;
+    int ready = 0;
+    for (int i = 0; i < 35; i++) {
+        sceKernelDelayThread(100 * 1000);
+        memset(&ext, 0, sizeof ext);
+        if (sceMusicPlayerServiceGetPlayStatusExtension(&ext) == 0 &&
+            ext.currentState == SCE_MUSIC_COMMAND_PLAY &&
+            (ext.durationMs > 0 || ext.currentTimeMs > 0)) {
+            ready = 1;
+            dbg("bgmusic: ready after %dms pos=%ums dur=%ums",
+                (i + 1) * 100, ext.currentTimeMs, ext.durationMs);
+            break;
+        }
+    }
+    if (!ready) dbg("bgmusic: ready timeout, attempting seek anyway");
+
+    for (int attempt = 0; attempt < 6; attempt++) {
+        memset(&ext, 0, sizeof ext);
+        int32_t st_rc = sceMusicPlayerServiceGetPlayStatusExtension(&ext);
+        if (st_rc == 0 && ext.currentTimeMs + 3000u >= seek_ms) {
+            dbg("bgmusic: seek landed at %ums (target %ums)", ext.currentTimeMs, seek_ms);
+            break;
+        }
+        int32_t set_sk = sceMusicPlayerServiceSetSeekTime(seek_ms);
+        int32_t cmd_sk = sceMusicPlayerServiceSetPlaybackCommand(SCE_MUSIC_COMMAND_SEEK, 0);
+        dbg("bgmusic: seek attempt %d target=%u set=%08x cmd=%08x (was %ums)",
+            attempt + 1, seek_ms, (unsigned)set_sk, (unsigned)cmd_sk, ext.currentTimeMs);
+        sceKernelDelayThread(250 * 1000);
+    }
+}
+
 void bgmusic_init(const char *data_dir) {
     snprintf(G.state_path, sizeof G.state_path, "%s/bgmusic.txt", data_dir);
     snprintf(G.pos_path, sizeof G.pos_path, "%s/bgmusic_pos.txt", data_dir);
@@ -234,9 +267,12 @@ int bgmusic_start(const char *item_id, const char *track_path, double pos_s, dou
         return (int)set_rc;
     }
 
-    sceMusicPlayerServiceSetVolume(SCE_MUSIC_MAX_VOLUME);
-
     uint32_t seek_ms = pos_s > 1.0 ? (uint32_t)(pos_s * 1000.0) : 0;
+    dbg("bgmusic: start pos_s=%.2f seek_ms=%u", pos_s, seek_ms);
+
+    /* Mute briefly while starting + seeking so the start of the book isn't heard */
+    sceMusicPlayerServiceSetVolume(seek_ms > 0 ? 0 : SCE_MUSIC_MAX_VOLUME);
+
     if (seek_ms > 0) {
         int32_t sk = sceMusicPlayerServiceSetSeekTime(seek_ms);
         dbg("bgmusic: pre-play SetSeekTime(%u) -> %08x", seek_ms, (unsigned)sk);
@@ -245,6 +281,7 @@ int bgmusic_start(const char *item_id, const char *track_path, double pos_s, dou
     int32_t play_rc = sceMusicPlayerServiceSetPlaybackCommand(SCE_MUSIC_COMMAND_PLAY, 0);
     dbg("bgmusic: PLAY -> %08x", (unsigned)play_rc);
     if (play_rc < 0) {
+        sceMusicPlayerServiceSetVolume(SCE_MUSIC_MAX_VOLUME);
         if (strcmp(play_path, track_path) != 0) rename(play_path, track_path);
         sys_acquire_bgm_port();
         if (err && err_sz) snprintf(err, err_sz, "MusicCore play failed (%08x)", (unsigned)play_rc);
@@ -252,17 +289,8 @@ int bgmusic_start(const char *item_id, const char *track_path, double pos_s, dou
     }
 
     if (seek_ms > 0) {
-        sceKernelDelayThread(200 * 1000);
-        SceMusicPlayerServicePlayStatusExtension ext;
-        memset(&ext, 0, sizeof ext);
-        int32_t st_rc = sceMusicPlayerServiceGetPlayStatusExtension(&ext);
-        dbg("bgmusic: post-play status rc=%08x state=%d pos=%ums",
-            (unsigned)st_rc, ext.currentState, ext.currentTimeMs);
-        if (st_rc == 0 && ext.currentTimeMs + 3000 < seek_ms) {
-            sceMusicPlayerServiceSetSeekTime(seek_ms);
-            int32_t sk_rc = sceMusicPlayerServiceSetPlaybackCommand(SCE_MUSIC_COMMAND_SEEK, 0);
-            dbg("bgmusic: post-play SEEK(%u) -> %08x", seek_ms, (unsigned)sk_rc);
-        }
+        wait_and_seek(seek_ms);
+        sceMusicPlayerServiceSetVolume(SCE_MUSIC_MAX_VOLUME);
     }
 
     str_copy(G.item_id, sizeof G.item_id, item_id);

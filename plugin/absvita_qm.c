@@ -219,6 +219,31 @@ static void refresh_status_from_service(SceMusicPlayerServicePlayStatusExtension
     }
 }
 
+static void wait_and_seek(uint32_t seek_ms) {
+    SceMusicPlayerServicePlayStatusExtension ext;
+    for (int i = 0; i < 35; i++) {
+        sceKernelDelayThread(100 * 1000);
+        sceClibMemset(&ext, 0, sizeof(ext));
+        if (sceMusicPlayerServiceGetPlayStatusExtension(&ext) == 0 &&
+            ext.currentState == SCE_MUSIC_COMMAND_PLAY &&
+            (ext.durationMs > 0 || ext.currentTimeMs > 0)) {
+            break;
+        }
+    }
+
+    for (int attempt = 0; attempt < 6; attempt++) {
+        sceClibMemset(&ext, 0, sizeof(ext));
+        if (sceMusicPlayerServiceGetPlayStatusExtension(&ext) == 0 &&
+            ext.currentTimeMs + 3000u >= seek_ms) {
+            break;
+        }
+        sceMusicPlayerServiceSetSeekTime(seek_ms);
+        int32_t sk = sceMusicPlayerServiceSetPlaybackCommand(SCE_MUSIC_COMMAND_SEEK, 0);
+        qm_log_hex("post-play SEEK", sk);
+        sceKernelDelayThread(250 * 1000);
+    }
+}
+
 static void do_toggle_play_pause(void) {
     if (ensure_music_service() < 0) return;
 
@@ -257,10 +282,10 @@ static void do_toggle_play_pause(void) {
             load_saved_pos_file();
         }
 
-        sceMusicPlayerServiceSetRepeatMode(SCE_MUSIC_REPEAT_MODE_DISABLE);
-        sceMusicPlayerServiceSetVolume(SCE_MUSIC_MAX_VOLUME);
-
         uint32_t seek_ms = g_saved_pos_ms;
+        sceMusicPlayerServiceSetRepeatMode(SCE_MUSIC_REPEAT_MODE_DISABLE);
+        sceMusicPlayerServiceSetVolume(seek_ms > 0 ? 0 : SCE_MUSIC_MAX_VOLUME);
+
         if (seek_ms > 0) {
             int32_t sk = sceMusicPlayerServiceSetSeekTime(seek_ms);
             qm_log_hex("pre-play SetSeekTime", sk);
@@ -272,17 +297,10 @@ static void do_toggle_play_pause(void) {
         if (prc >= 0) {
             g_is_playing = 1;
             if (seek_ms > 0) {
-                sceKernelDelayThread(200 * 1000);
-                SceMusicPlayerServicePlayStatusExtension post;
-                sceClibMemset(&post, 0, sizeof(post));
-                if (sceMusicPlayerServiceGetPlayStatusExtension(&post) == 0 &&
-                    post.currentTimeMs + 3000u < seek_ms) {
-                    sceMusicPlayerServiceSetSeekTime(seek_ms);
-                    int32_t sk2 = sceMusicPlayerServiceSetPlaybackCommand(SCE_MUSIC_COMMAND_SEEK, 0);
-                    qm_log_hex("post-play SEEK", sk2);
-                }
+                wait_and_seek(seek_ms);
             }
         }
+        sceMusicPlayerServiceSetVolume(SCE_MUSIC_MAX_VOLUME);
     }
 }
 
