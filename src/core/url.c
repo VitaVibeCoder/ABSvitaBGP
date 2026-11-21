@@ -13,8 +13,10 @@ int url_join(const char *base, const char *path, char *out, size_t n) {
 }
 
 int url_valid(const char *s) {
-    if (strncmp(s, "http://", 7) != 0) return 0;
-    const char *h = s + 7;
+    const char *h;
+    if (strncmp(s, "http://", 7) == 0) h = s + 7;
+    else if (strncmp(s, "https://", 8) == 0) h = s + 8;
+    else return 0;
     size_t hl = strcspn(h, ":/");
     if (hl == 0) return 0;
     for (size_t i = 0; i < hl; i++)

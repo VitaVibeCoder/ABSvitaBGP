@@ -55,6 +55,11 @@ int http_init(void) {
 
 void http_exit(void) { curl_global_cleanup(); }
 
+/* Set at shutdown: every transfer in flight aborts at its next progress tick, so the
+ * worker threads can be joined before the network stack is torn down. */
+static volatile int g_abort_all;
+void http_abort_all(void) { g_abort_all = 1; }
+
 /* ---- shared transfer state ------------------------------------------------ */
 
 typedef struct {
@@ -130,6 +135,7 @@ static size_t on_body(char *p, size_t sz, size_t n, void *ud) {
 static int on_progress(void *ud, curl_off_t dt, curl_off_t dn, curl_off_t ut, curl_off_t un) {
     (void)dt; (void)dn; (void)ut; (void)un;
     Xfer *x = ud;
+    if (g_abort_all) { x->aborted = true; return 1; }
     if (x->abort_cb && x->abort_cb(x->ud)) { x->aborted = true; return 1; }
     if (now_ms() - x->last_data > STALL_MS) return 1; /* no bytes for too long */
     return 0;

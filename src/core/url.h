@@ -4,7 +4,7 @@
 
 /* "http://h:p/base" + "/api/x" -> "http://h:p/base/api/x" (no doubled slash). */
 int url_join(const char *base, const char *path, char *out, size_t n);
-/* Accepts http://host[:port][/path]. Rejects https and junk. 1 when valid. */
+/* Accepts http:// or https://host[:port][/path]. Rejects other schemes and junk. 1 when valid. */
 int url_valid(const char *s);
 /* Trims whitespace and trailing slashes, adds "http://" when no scheme. */
 void url_normalize(char *s, size_t n);

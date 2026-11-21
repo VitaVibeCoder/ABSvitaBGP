@@ -16,7 +16,10 @@ TEST(url_join_and_valid) {
     CHECK(url_join("http://h", "x", b, 5) < 0);
     CHECK(url_valid("http://192.168.1.10:13378/audiobookshelf"));
     CHECK(url_valid("http://abs.local"));
-    CHECK(!url_valid("https://abs.local"));
+    CHECK(url_valid("https://abs.local"));
+    CHECK(url_valid("https://abs.example.com:443/audiobookshelf"));
+    CHECK(!url_valid("https://"));
+    CHECK(!url_valid("ftp://abs.local"));
     CHECK(!url_valid("http://:80"));
     CHECK(!url_valid("http://host:99999"));
     CHECK(!url_valid("http://ho st"));

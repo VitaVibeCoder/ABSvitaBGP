@@ -18,6 +18,8 @@ typedef void (*AuthFn)(char *out, unsigned n, int refresh);
 
 int http_init(void);
 void http_exit(void);
+/* Shutdown: abort every transfer in flight and refuse the rest (no way back). */
+void http_abort_all(void);
 /* Offset (ms) to add to the local clock to get server time (from Date headers). */
 long long http_clock_offset(bool *known);
 void http_set_clock_offset(long long ms);

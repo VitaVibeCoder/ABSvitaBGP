@@ -64,7 +64,7 @@ static void connect(void) {
     if (L.busy) return;
     url_normalize(L.server, sizeof L.server);
     if (!url_valid(L.server)) {
-        str_copy(L.error, sizeof L.error, "Enter the server address, e.g. http://192.168.1.10:13378");
+        str_copy(L.error, sizeof L.error, "Enter the server address, e.g. http://192.168.1.10:13378 or https://abs.example.com");
         L.detail[0] = 0;
         L.focus = F_SERVER;
         return;

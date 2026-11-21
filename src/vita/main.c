@@ -128,8 +128,22 @@ int main(void) {
     /* the system asked us to close: save the position and go */
     dbg("quit requested");
     player_exit();
+    dbg("shutdown: player done");
     engine_exit();
+    dbg("shutdown: engine done");
+    /* stop the network threads before the network goes away under them */
+    http_abort_all();
+    dl_exit();
+    worker_destroy(g_api);
+    worker_destroy(g_sync);
+    worker_destroy(g_covers);
+    g_api = g_sync = g_covers = NULL;
+    dbg("shutdown: workers done");
+    http_exit();
+    dbg("shutdown: http done");
     vita2d_fini();
+    dbg("shutdown: gfx done");
     sys_exit();
+    dbg("shutdown: complete");
     return 0;
 }
