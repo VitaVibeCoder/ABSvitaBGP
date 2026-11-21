@@ -1,0 +1,967 @@
+﻿diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 401bc06..df234ed 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -55,7 +55,7 @@ if(AUTOPILOT)
+ endif()
+ target_include_directories(${PROJECT_NAME} PRIVATE
+   /opt/curl-mbed/include
+-  src/core src/net src/ui src/vita vendor/cjson vendor/sonic vendor/helix-aac vendor/stb)
++  src/core src/net src/ui src/vita vendor/cjson vendor/sonic vendor/helix-aac vendor/stb vendor/libSceMusic)
+ 
+ target_link_libraries(${PROJECT_NAME}
+   vita2d freetype png jpeg bz2 z
+@@ -65,6 +65,7 @@ target_link_libraries(${PROJECT_NAME}
+   SceDisplay_stub SceGxm_stub SceCtrl_stub SceTouch_stub SceAudio_stub
+   ScePower_stub SceSysmodule_stub SceCommonDialog_stub SceAppUtil_stub SceAppMgr_stub
+   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub SceRtc_stub SceIme_stub
++  ${CMAKE_CURRENT_SOURCE_DIR}/vendor/libSceMusic/libSceMusic_stub_weak.a
+   SceKernelThreadMgr_stub SceKernelModulemgr_stub SceIofilemgr_stub SceProcessmgr_stub SceLibKernel_stub SceSysmem_stub
+ )
+ 
+@@ -78,4 +79,5 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
+   FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+   FILE assets/fonts/Manrope-500.ttf assets/Manrope-500.ttf
+   FILE assets/fonts/Manrope-700.ttf assets/Manrope-700.ttf
++  FILE vendor/libSceMusic/libSceMusic.suprx module/libSceMusic.suprx
+ )
+diff --git a/src/ui/app.c b/src/ui/app.c
+index c3566c7..2520045 100644
+--- a/src/ui/app.c
++++ b/src/ui/app.c
+@@ -1,4 +1,5 @@
+ #include "app.h"
++#include "bgmusic.h"
+ 
+ #include <math.h>
+ #include <stdio.h>
+@@ -184,6 +185,14 @@ void app_open_book(int lib_index) { app_push(view_book_new(lib_book(lib_index)))
+ void app_open_book_summary(const BookSummary *b) { app_push(view_book_new(b)); }
+ 
+ void app_play(const BookSummary *b, double start) {
++    if (bgmusic_active()) {
++        char bg_id[40];
++        double bg_pos = 0, bg_dur = 0;
++        if (bgmusic_stop(bg_id, sizeof bg_id, &bg_pos, &bg_dur)) {
++            app_record_bg_progress(bg_id, bg_pos, bg_dur);
++            if (start < 0 && !strcmp(bg_id, b->id)) start = bg_pos;
++        }
++    }
+     player_open(b, start);
+     app_open_player();
+ }
+diff --git a/src/ui/app.h b/src/ui/app.h
+index 3abab86..8de2a2e 100644
+--- a/src/ui/app.h
++++ b/src/ui/app.h
+@@ -31,6 +31,7 @@ struct View {
+ extern Config g_cfg;
+ void app_save_config(void);
+ const char *app_data_dir(void);
++void app_record_bg_progress(const char *item_id, double pos_s, double dur_s);
+ 
+ void app_init(void);
+ void app_update(const Input *in, float dt);
+diff --git a/src/ui/scr_player.c b/src/ui/scr_player.c
+index 6fc9712..42710f5 100644
+--- a/src/ui/scr_player.c
++++ b/src/ui/scr_player.c
+@@ -6,6 +6,7 @@
+ 
+ #include <vita2d.h>
+ 
++#include "bgmusic.h"
+ #include "covers.h"
+ #include "downloads.h"
+ #include "libmodel.h"
+@@ -27,7 +28,7 @@
+ #define PILL_H 42.0f
+ 
+ enum { K_BACK, K_PREV, K_PLAY, K_NEXT, K_FWD };
+-enum { P_SPEED, P_SLEEP, P_CHAPTERS, P_DOWNLOAD, P_INFO, P_COUNT };
++enum { P_SPEED, P_SLEEP, P_CHAPTERS, P_DOWNLOAD, P_BGM, P_INFO, P_COUNT };
+ 
+ static struct {
+     int row, col[2];
+@@ -55,7 +56,16 @@ static void do_control(int k) {
+     switch (k) {
+     case K_BACK: player_skip(-g_cfg.skip_back); break;
+     case K_PREV: player_chapter(-1); break;
+-    case K_PLAY: player_toggle(); break;
++    case K_PLAY:
++        if (bgmusic_active()) {
++            char bg_id[40];
++            double bg_pos = 0, bg_dur = 0;
++            if (bgmusic_stop(bg_id, sizeof bg_id, &bg_pos, &bg_dur))
++                app_record_bg_progress(bg_id, bg_pos, bg_dur);
++            app_toast("Stopped System Music");
++        }
++        player_toggle();
++        break;
+     case K_NEXT: player_chapter(1); break;
+     case K_FWD: player_skip(g_cfg.skip_fwd); break;
+     }
+@@ -75,6 +85,32 @@ static void do_pill(int p) {
+         else if (dl_start(b->id) != 0) app_toast("Couldn't start the download");
+         break;
+     }
++    case P_BGM: {
++        const BookDetail *b = player_book();
++        if (!b) break;
++        if (bgmusic_active()) {
++            char bg_id[40];
++            double bg_pos = 0, bg_dur = 0;
++            if (bgmusic_stop(bg_id, sizeof bg_id, &bg_pos, &bg_dur))
++                app_record_bg_progress(bg_id, bg_pos, bg_dur);
++            app_toast("Stopped System Music");
++            break;
++        }
++        if (!dl_is_done(b->id) || b->ntracks <= 0) {
++            app_toast("Download book first for BG play");
++            break;
++        }
++        char path[512], err[96];
++        dl_track_path(b->id, 0, b->tracks[0].ext, path, sizeof path);
++        double pos = player_position();
++        player_pause();
++        engine_stop();
++        if (bgmusic_start(b->id, path, pos, b->duration, err, sizeof err) == 0)
++            app_toast("Playing in System Music (safe to launch a game)");
++        else
++            app_toast(err[0] ? err : "System Music handoff failed");
++        break;
++    }
+     case P_INFO: {
+         const BookDetail *b = player_book();
+         if (!b) break;
+@@ -157,7 +193,7 @@ void player_screen_update(const Input *in, float dt) {
+         return;
+     }
+     if (in->down & (B_BACK | B_START)) { app_close_player(); return; }
+-    if (in->down & B_SQUARE) player_toggle();
++    if (in->down & B_SQUARE) do_control(K_PLAY);
+     if (in->repeat & B_L) player_skip(-g_cfg.skip_back);
+     if (in->repeat & B_R) player_skip(g_cfg.skip_fwd);
+     if (in->down & B_TRIANGLE) open_chapters();
+@@ -165,9 +201,8 @@ void player_screen_update(const Input *in, float dt) {
+     int n = S.row == 0 ? 5 : P_COUNT;
+     if (in->repeat & B_LEFT && S.col[S.row] > 0) S.col[S.row]--;
+     if (in->repeat & B_RIGHT && S.col[S.row] + 1 < n) S.col[S.row]++;
+-    /* both rows have five items: up/down keep the column */
+     if (in->repeat & B_DOWN && S.row == 0) { S.row = 1; S.col[1] = S.col[0]; }
+-    if (in->repeat & B_UP && S.row == 1) { S.row = 0; S.col[0] = S.col[1]; }
++    if (in->repeat & B_UP && S.row == 1) { S.row = 0; S.col[0] = S.col[1] < 5 ? S.col[1] : 4; }
+     if (in->down & B_OK) {
+         if (S.row == 0) do_control(S.col[0]);
+         else do_pill(S.col[1]);
+@@ -329,9 +364,9 @@ void player_screen_draw(void) {
+     control(K_NEXT, cx + 96, 30, IC_NEXT, NULL);
+     control(K_FWD, cx + 192, 30, IC_FWD, nf);
+ 
+-    /* options: three pills, then download and book-details icons */
+-    float ib = PILL_H, gap = 12;
+-    float pw = (RW - 2 * ib - 4 * gap) / 3;
++    /* options: three pills, then download, BG music, and book-details icons */
++    float ib = PILL_H, gap = 10;
++    float pw = (RW - 3 * ib - 5 * gap) / 3;
+     char sp[16], sl[32];
+     snprintf(sp, sizeof sp, "%g\xC3\x97", player_speed());
+     const SleepTimer *slp = player_sleep();
+@@ -345,7 +380,8 @@ void player_screen_draw(void) {
+     int dl_icon = ds == DL_DONE ? IC_CHECK : ds == DL_QUEUED ? IC_CLOCK : ds == DL_ACTIVE ? IC_PAUSE : IC_DOWNLOAD;
+     uint32_t dl_c = ds == DL_DONE ? C_ACCENT : ds == DL_FAILED ? C_ERROR : C_TEXT;
+     icon_button(P_DOWNLOAD, RX + 3 * (pw + gap), dl_icon, dl_c, ds == DL_ACTIVE || ds == DL_PAUSED ? dfrac : -1);
+-    icon_button(P_INFO, RX + 3 * (pw + gap) + ib + gap, IC_INFO, C_TEXT, -1);
++    icon_button(P_BGM, RX + 3 * (pw + gap) + ib + gap, IC_HEADPHONES, bgmusic_active() ? C_ACCENT : C_TEXT, -1);
++    icon_button(P_INFO, RX + 3 * (pw + gap) + 2 * (ib + gap), IC_INFO, C_TEXT, -1);
+ 
+     if (S.chapters) {
+         draw_chapters();
+@@ -356,6 +392,8 @@ void player_screen_draw(void) {
+         snprintf(t, sizeof t, ds == DL_NONE ? "Download" : ds == DL_ACTIVE ? "Pause download (%d%%)" :
+                  ds == DL_QUEUED ? "Pause download" : ds == DL_DONE ? "Saved" : "Resume download", (int)(dfrac * 100));
+         hint(g_ok(), t);
++    } else if (S.row == 1 && S.col[1] == P_BGM) {
++        hint(g_ok(), bgmusic_active() ? "Stop BG music" : "Play in BG (games)");
+     } else if (S.row == 1 && S.col[1] == P_INFO) {
+         hint(g_ok(), "Book details");
+     }
+diff --git a/src/vita/bgmusic.c b/src/vita/bgmusic.c
+new file mode 100644
+index 0000000..b8be692
+--- /dev/null
++++ b/src/vita/bgmusic.c
+@@ -0,0 +1,264 @@
++#include "bgmusic.h"
++
++#include <ctype.h>
++#include <psp2/kernel/modulemgr.h>
++#include <psp2/kernel/threadmgr.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "dbg.h"
++#include "music.h"
++#include "strutil.h"
++#include "sys.h"
++
++#define BGM_MOD_PATH "app0:module/libSceMusic.suprx"
++
++static struct {
++    SceUID mod;
++    bool svc_inited;
++    bool active;
++    char state_path[256];
++    char item_id[40];
++    double duration;
++    char orig_path[512];
++    char play_path[512];
++} G = {-1, false, false, {0}, {0}, 0, {0}, {0}};
++
++static bool ends_with_ci(const char *s, const char *suf) {
++    size_t ls = strlen(s), lf = strlen(suf);
++    if (ls < lf) return false;
++    const char *p = s + ls - lf;
++    for (size_t i = 0; i < lf; i++)
++        if (tolower((unsigned char)p[i]) != tolower((unsigned char)suf[i])) return false;
++    return true;
++}
++
++static void save_state(void) {
++    if (!G.state_path[0]) return;
++    FILE *f = fopen(G.state_path, "wb");
++    if (!f) return;
++    fprintf(f, "%s\n%.3f\n%s\n%s\n", G.item_id, G.duration, G.orig_path, G.play_path);
++    fclose(f);
++}
++
++static void clear_state(void) {
++    G.item_id[0] = 0;
++    G.duration = 0;
++    G.orig_path[0] = 0;
++    G.play_path[0] = 0;
++    G.active = false;
++    if (G.state_path[0]) remove(G.state_path);
++}
++
++static void trim_nl(char *s) {
++    size_t n = strlen(s);
++    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r')) s[--n] = 0;
++}
++
++static bool load_state(void) {
++    if (!G.state_path[0]) return false;
++    FILE *f = fopen(G.state_path, "rb");
++    if (!f) return false;
++    char dline[64];
++    bool ok = fgets(G.item_id, sizeof G.item_id, f) &&
++              fgets(dline, sizeof dline, f) &&
++              fgets(G.orig_path, sizeof G.orig_path, f) &&
++              fgets(G.play_path, sizeof G.play_path, f);
++    fclose(f);
++    if (!ok) { clear_state(); return false; }
++    trim_nl(G.item_id);
++    trim_nl(dline);
++    trim_nl(G.orig_path);
++    trim_nl(G.play_path);
++    G.duration = atof(dline);
++    return G.item_id[0] != 0 && G.play_path[0] != 0;
++}
++
++static void restore_renamed_file(void) {
++    if (G.orig_path[0] && G.play_path[0] && strcmp(G.orig_path, G.play_path) != 0) {
++        int r = rename(G.play_path, G.orig_path);
++        dbg("bgmusic: restore rename '%s' -> '%s' rc=%d", G.play_path, G.orig_path, r);
++    }
++}
++
++static int ensure_service(void) {
++    if (G.mod < 0) return -1;
++    if (G.svc_inited) return 0;
++    int32_t rc = sceMusicPlayerServiceInitialize(SCE_MUSIC_PLAYER_SERVICE_INIT_TYPE_0);
++    dbg("bgmusic: init(type 0) -> %08x", (unsigned)rc);
++    if (rc < 0 && rc != (int32_t)SCE_MUSIC_PLAYER_SERVICE_ERROR_ALREADY_INITIALIZED) {
++        rc = sceMusicPlayerServiceInitialize(SCE_MUSIC_PLAYER_SERVICE_INIT_TYPE_1);
++        dbg("bgmusic: init(type 1) -> %08x", (unsigned)rc);
++    }
++    if (rc < 0 && rc != (int32_t)SCE_MUSIC_PLAYER_SERVICE_ERROR_ALREADY_INITIALIZED)
++        return (int)rc;
++    G.svc_inited = true;
++    return 0;
++}
++
++void bgmusic_init(const char *data_dir) {
++    snprintf(G.state_path, sizeof G.state_path, "%s/bgmusic.txt", data_dir);
++    G.mod = sceKernelLoadStartModule(BGM_MOD_PATH, 0, NULL, 0, NULL, NULL);
++    dbg("bgmusic: load %s -> %08x", BGM_MOD_PATH, (unsigned)G.mod);
++    if (load_state()) {
++        dbg("bgmusic: loaded saved state id=%s path=%s", G.item_id, G.play_path);
++        G.active = true;
++    }
++}
++
++bool bgmusic_reconcile(char *item_id, size_t id_sz, double *pos_s, double *dur_s) {
++    if (!G.item_id[0] || G.mod < 0) return false;
++    if (ensure_service() < 0) return false;
++
++    char uri[SCE_MUSIC_MAX_STRING_LENGTH];
++    memset(uri, 0, sizeof uri);
++    int32_t urc = sceMusicPlayerServiceGetUri(uri, sizeof uri);
++
++    SceMusicPlayerServicePlayStatusExtension ext;
++    memset(&ext, 0, sizeof ext);
++    int32_t src = sceMusicPlayerServiceGetPlayStatusExtension(&ext);
++    dbg("bgmusic: reconcile urc=%08x uri='%s' src=%08x state=%d pos=%ums dur=%ums",
++        (unsigned)urc, uri, (unsigned)src, ext.currentState, ext.currentTimeMs, ext.durationMs);
++
++    if (src != 0) return false;
++
++    bool uri_matches = (urc == 0 && uri[0] &&
++                        (strcmp(uri, G.play_path) == 0 || strstr(uri, G.item_id) != NULL));
++    if (!uri_matches) {
++        /* SceShell moved on to another track or cleared its URI */
++        restore_renamed_file();
++        clear_state();
++        return false;
++    }
++
++    if (ext.currentState != SCE_MUSIC_COMMAND_PLAY) G.active = false;
++    if (ext.currentTimeMs == 0) return false;
++
++    if (item_id && id_sz) str_copy(item_id, id_sz, G.item_id);
++    if (pos_s) *pos_s = ext.currentTimeMs / 1000.0;
++    if (dur_s) *dur_s = G.duration > 0 ? G.duration : (ext.durationMs / 1000.0);
++    return true;
++}
++
++int bgmusic_start(const char *item_id, const char *track_path, double pos_s, double dur_s,
++                  char *err, size_t err_sz) {
++    if (err && err_sz) err[0] = 0;
++    if (G.mod < 0) {
++        if (err && err_sz) str_copy(err, err_sz, "libSceMusic module not loaded");
++        return -1;
++    }
++
++    /* Release ABSvita's own BGM port so SceShell's MusicCore can take audio focus */
++    sys_release_bgm_port();
++
++    int rc = ensure_service();
++    if (rc < 0) {
++        sys_acquire_bgm_port();
++        if (err && err_sz) snprintf(err, err_sz, "Music service init failed (%08x)", (unsigned)rc);
++        return rc;
++    }
++
++    /* If we previously renamed a different book's file, stop and restore it first */
++    if (G.play_path[0] && strcmp(G.orig_path, track_path) != 0) {
++        sceMusicPlayerServiceSetPlaybackCommand(SCE_MUSIC_COMMAND_STOP, 0);
++        sceKernelDelayThread(100 * 1000);
++        restore_renamed_file();
++    }
++
++    char play_path[512];
++    str_copy(play_path, sizeof play_path, track_path);
++
++    SceMusicOpt opt;
++    memset(&opt, 0, sizeof opt);
++    opt.unk_00 = -1;
++
++    sceMusicPlayerServiceSetRepeatMode(SCE_MUSIC_REPEAT_MODE_DISABLE);
++    int32_t set_rc = sceMusicPlayerServiceSetUri(play_path, &opt);
++    dbg("bgmusic: SetUri('%s') -> %08x", play_path, (unsigned)set_rc);
++
++    /* MusicCore supports AAC (.m4a) and may reject the .m4b extension by name */
++    if (set_rc < 0 && ends_with_ci(track_path, ".m4b")) {
++        size_t len = strlen(play_path);
++        play_path[len - 1] = 'a'; /* .m4b -> .m4a */
++        int rrc = rename(track_path, play_path);
++        dbg("bgmusic: rename '%s' -> '%s' rc=%d", track_path, play_path, rrc);
++        if (rrc == 0) {
++            set_rc = sceMusicPlayerServiceSetUri(play_path, &opt);
++            dbg("bgmusic: SetUri('%s') -> %08x", play_path, (unsigned)set_rc);
++            if (set_rc < 0) rename(play_path, track_path);
++        }
++    }
++
++    if (set_rc < 0) {
++        sys_acquire_bgm_port();
++        if (err && err_sz) snprintf(err, err_sz, "MusicCore rejected file (%08x)", (unsigned)set_rc);
++        return (int)set_rc;
++    }
++
++    sceMusicPlayerServiceSetVolume(SCE_MUSIC_MAX_VOLUME);
++
++    uint32_t seek_ms = pos_s > 1.0 ? (uint32_t)(pos_s * 1000.0) : 0;
++    if (seek_ms > 0) {
++        int32_t sk = sceMusicPlayerServiceSetSeekTime(seek_ms);
++        dbg("bgmusic: pre-play SetSeekTime(%u) -> %08x", seek_ms, (unsigned)sk);
++    }
++
++    int32_t play_rc = sceMusicPlayerServiceSetPlaybackCommand(SCE_MUSIC_COMMAND_PLAY, 0);
++    dbg("bgmusic: PLAY -> %08x", (unsigned)play_rc);
++    if (play_rc < 0) {
++        if (strcmp(play_path, track_path) != 0) rename(play_path, track_path);
++        sys_acquire_bgm_port();
++        if (err && err_sz) snprintf(err, err_sz, "MusicCore play failed (%08x)", (unsigned)play_rc);
++        return (int)play_rc;
++    }
++
++    if (seek_ms > 0) {
++        sceKernelDelayThread(200 * 1000);
++        SceMusicPlayerServicePlayStatusExtension ext;
++        memset(&ext, 0, sizeof ext);
++        int32_t st_rc = sceMusicPlayerServiceGetPlayStatusExtension(&ext);
++        dbg("bgmusic: post-play status rc=%08x state=%d pos=%ums",
++            (unsigned)st_rc, ext.currentState, ext.currentTimeMs);
++        if (st_rc == 0 && ext.currentTimeMs + 3000 < seek_ms) {
++            sceMusicPlayerServiceSetSeekTime(seek_ms);
++            int32_t sk_rc = sceMusicPlayerServiceSetPlaybackCommand(SCE_MUSIC_COMMAND_SEEK, 0);
++            dbg("bgmusic: post-play SEEK(%u) -> %08x", seek_ms, (unsigned)sk_rc);
++        }
++    }
++
++    str_copy(G.item_id, sizeof G.item_id, item_id);
++    G.duration = dur_s;
++    str_copy(G.orig_path, sizeof G.orig_path, track_path);
++    str_copy(G.play_path, sizeof G.play_path, play_path);
++    G.active = true;
++    save_state();
++    return 0;
++}
++
++bool bgmusic_stop(char *item_id, size_t id_sz, double *pos_s, double *dur_s) {
++    bool got_pos = false;
++    if (G.mod >= 0 && G.active) {
++        if (ensure_service() == 0) {
++            got_pos = bgmusic_reconcile(item_id, id_sz, pos_s, dur_s);
++            int32_t rc = sceMusicPlayerServiceSetPlaybackCommand(SCE_MUSIC_COMMAND_STOP, 0);
++            dbg("bgmusic: STOP -> %08x", (unsigned)rc);
++            sceKernelDelayThread(100 * 1000);
++        }
++    }
++    restore_renamed_file();
++    clear_state();
++    sys_acquire_bgm_port();
++    return got_pos;
++}
++
++bool bgmusic_active(void) { return G.active; }
++
++void bgmusic_shutdown(void) {
++    if (G.svc_inited) {
++        /* Disconnect client WITHOUT sending STOP so SceShell keeps playing under games */
++        int32_t rc = sceMusicPlayerServiceTerminate();
++        dbg("bgmusic: terminate (keep playing=%d) -> %08x", (int)G.active, (unsigned)rc);
++        G.svc_inited = false;
++    }
++}
+diff --git a/src/vita/bgmusic.h b/src/vita/bgmusic.h
+new file mode 100644
+index 0000000..1a2adbf
+--- /dev/null
++++ b/src/vita/bgmusic.h
+@@ -0,0 +1,34 @@
++/* Background playback via SceShell's MusicCore (libSceMusic).
++ * Lets a downloaded single-file audiobook keep playing under games while
++ * ABSvita is closed, and reconciles the position back into the progress queue
++ * when ABSvita is reopened. */
++#ifndef ABSVITA_BGMUSIC_H
++#define ABSVITA_BGMUSIC_H
++#include <stdbool.h>
++#include <stddef.h>
++
++/* Loads app0:module/libSceMusic.suprx and reads any saved handoff state. */
++void bgmusic_init(const char *data_dir);
++
++/* Queries SceShell for any progress made while ABSvita was closed.
++ * Returns true if a valid position (> 0) was retrieved for a known book. */
++bool bgmusic_reconcile(char *item_id, size_t id_sz, double *pos_s, double *dur_s);
++
++/* Hands off a downloaded local audio file to SceShell's MusicPlayerService
++ * at pos_s. Automatically renames .m4b -> .m4a if MusicCore rejects .m4b.
++ * Returns 0 on success, < 0 on failure (and writes a short user message to err). */
++int bgmusic_start(const char *item_id, const char *track_path, double pos_s, double dur_s,
++                  char *err, size_t err_sz);
++
++/* Stops SceShell playback (if active), restores any .m4a -> .m4b rename,
++ * re-acquires ABSvita's BGM port, and optionally returns the last position. */
++bool bgmusic_stop(char *item_id, size_t id_sz, double *pos_s, double *dur_s);
++
++/* True when ABSvita has handed playback off to SceShell and hasn't stopped it. */
++bool bgmusic_active(void);
++
++/* Disconnects the MusicPlayerService client WITHOUT stopping playback, so
++ * SceShell keeps playing after ABSvita exits to launch a game. */
++void bgmusic_shutdown(void);
++
++#endif
+diff --git a/src/vita/main.c b/src/vita/main.c
+index 2300bc1..1b446f0 100644
+--- a/src/vita/main.c
++++ b/src/vita/main.c
+@@ -9,6 +9,7 @@
+ 
+ #include "abs_client.h"
+ #include "app.h"
++#include "bgmusic.h"
+ #include "covers.h"
+ #include "dbg.h"
+ #include "downloads.h"
+@@ -17,6 +18,7 @@
+ #include "ime.h"
+ #include "input.h"
+ #include "libmodel.h"
++#include "osal.h"
+ #include "player.h"
+ #include "progress_queue.h"
+ #include "strutil.h"
+@@ -52,6 +54,24 @@ static int64_t ux0_free(const char *dir) {
+ 
+ static void save_queue(void) { pq_save(&g_pq, DATA "/progress_queue.json"); }
+ 
++void app_record_bg_progress(const char *item_id, double pos_s, double dur_s) {
++    if (!item_id || !item_id[0] || pos_s <= 0) return;
++    QEntry e;
++    memset(&e, 0, sizeof e);
++    str_copy(e.item_id, sizeof e.item_id, item_id);
++    e.current_time = pos_s;
++    e.duration = dur_s;
++    bool known;
++    long long off = http_clock_offset(&known);
++    e.updated_ms = wall_ms() + (known ? off : 0);
++    e.finished = dur_s > 0 && pos_s >= dur_s - 1;
++    e.pending = true;
++    pq_put(&g_pq, &e);
++    save_queue();
++    player_flush_queue();
++    dbg("bgmusic: saved progress id=%s pos=%.1f/%.1f", item_id, pos_s, dur_s);
++}
++
+ static void make_device_id(void) {
+     if (g_cfg.device_id[0]) return;
+     SceRtcTick t;
+@@ -84,6 +104,13 @@ int main(void) {
+     if (engine_init(&vita_sink, absc_stream_auth) != 0) dbg("engine_init failed");
+     dl_init(DATA "/books", ux0_free);
+     player_init(&g_cfg, &g_pq, save_queue, sys_model());
++    bgmusic_init(DATA);
++    {
++        char bg_id[40];
++        double bg_pos = 0, bg_dur = 0;
++        if (bgmusic_reconcile(bg_id, sizeof bg_id, &bg_pos, &bg_dur))
++            app_record_bg_progress(bg_id, bg_pos, bg_dur);
++    }
+     lib_init();
+ 
+     vita2d_init_advanced_with_msaa(4 * 1024 * 1024, SCE_GXM_MULTISAMPLE_4X);
+@@ -131,6 +158,8 @@ int main(void) {
+     dbg("shutdown: player done");
+     engine_exit();
+     dbg("shutdown: engine done");
++    bgmusic_shutdown();
++    dbg("shutdown: bgmusic done");
+     /* stop the network threads before the network goes away under them */
+     http_abort_all();
+     dl_exit();
+diff --git a/src/vita/sys.c b/src/vita/sys.c
+index f15b55d..2d2ea08 100644
+--- a/src/vita/sys.c
++++ b/src/vita/sys.c
+@@ -14,7 +14,7 @@
+ 
+ #include "dbg.h"
+ 
+-static bool g_cross = true, g_screen = true;
++static bool g_cross = true, g_screen = true, g_bgm_port = false;
+ static int g_lang = SCE_SYSTEM_PARAM_LANG_ENGLISH_US;
+ static void *g_net_mem;
+ static volatile bool g_awake, g_fg = true;
+@@ -83,16 +83,28 @@ int sys_init(void) {
+     if (r < 0) dbg("sceNetCtlInit %08x", (unsigned)r);
+ 
+     /* the BGM port keeps our audio running with the display off (as ElevenMPV does) */
+-    r = sceAppMgrAcquireBgmPort();
+-    if (r < 0) dbg("sceAppMgrAcquireBgmPort %08x", (unsigned)r);
++    sys_acquire_bgm_port();
+     g_last_active = now_s();
+     SceUID th = sceKernelCreateThread("power_tick", tick_thread, 0x10000100, 0x4000, 0, 0, NULL);
+     if (th >= 0) sceKernelStartThread(th, 0, NULL);
+     return 0;
+ }
+ 
+-void sys_exit(void) {
++void sys_acquire_bgm_port(void) {
++    if (g_bgm_port) return;
++    int r = sceAppMgrAcquireBgmPort();
++    if (r < 0) dbg("sceAppMgrAcquireBgmPort %08x", (unsigned)r);
++    else g_bgm_port = true;
++}
++
++void sys_release_bgm_port(void) {
++    if (!g_bgm_port) return;
+     sceAppMgrReleaseBgmPort();
++    g_bgm_port = false;
++}
++
++void sys_exit(void) {
++    sys_release_bgm_port();
+     sceNetCtlTerm();
+     sceNetTerm();
+     sceSysmoduleUnloadModule(SCE_SYSMODULE_NET);
+diff --git a/src/vita/sys.h b/src/vita/sys.h
+index 5ff4493..165d2b7 100644
+--- a/src/vita/sys.h
++++ b/src/vita/sys.h
+@@ -18,5 +18,7 @@ bool sys_quit_requested(void);   /* the system asked the app to close */
+ bool sys_visible(void);          /* display on and the app in front: worth drawing */
+ const char *sys_model(void);
+ int sys_language(void);
++void sys_acquire_bgm_port(void);
++void sys_release_bgm_port(void);
+ 
+ #endif
+diff --git a/vendor/libSceMusic/libSceMusic.suprx b/vendor/libSceMusic/libSceMusic.suprx
+new file mode 100644
+index 0000000000000000000000000000000000000000..a41c7c47ea4ac69850a950e4e3a5c635b1a4ea3a
+GIT binary patch
+literal 8592
+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
+A5dZ)H
+
+
+literal 0
+HcmV?d00001
+
+
+diff --git a/vendor/libSceMusic/libSceMusic_stub_weak.a b/vendor/libSceMusic/libSceMusic_stub_weak.a
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d6c560f8e14fe72f225076e981225502690f929
+GIT binary patch
+literal 24346
+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
+
+
+literal 0
+HcmV?d00001
+
+
+diff --git a/vendor/libSceMusic/music.h b/vendor/libSceMusic/music.h
+new file mode 100644
+index 0000000..da0e8aa
+--- /dev/null
++++ b/vendor/libSceMusic/music.h
+@@ -0,0 +1,175 @@
++#pragma once
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#if defined(SCE_MUSIC_PRX)
++#define PRX_INTERFACE __declspec (dllexport)
++#else
++#define PRX_INTERFACE
++#endif
++
++#define SCE_MUSIC_ERROR_INVALID_ARG                                                0x80101900
++#define SCE_MUSIC_ERROR_NOT_INITIALIZED                                        0x80101901
++#define SCE_MUSIC_ERROR_ALREADY_INITIALIZED                                0x80101902
++#define SCE_MUSIC_ERROR_NOT_READY                                                0x80101903
++
++#define SCE_MUSIC_PLAYER_SERVICE_ERROR_INVALID_ARG                                                0x80100E00
++#define SCE_MUSIC_PLAYER_SERVICE_ERROR_NOT_INITIALIZED                                        0x80100E01
++#define SCE_MUSIC_PLAYER_SERVICE_ERROR_ALREADY_INITIALIZED                                0x80100E02
++
++#define SCE_MUSIC_MAX_STRING_LENGTH                                0x401
++#define SCE_MUSIC_MAX_QUERY_LENGTH                                0x801
++#define SCE_MUSIC_MAX_VOLUME                                        0x8000
++
++#define SCE_MUSIC_PLAYER_SERVICE_INIT_TYPE_0        0
++#define SCE_MUSIC_PLAYER_SERVICE_INIT_TYPE_1        1
++#define SCE_MUSIC_PLAYER_SERVICE_INIT_TYPE_2        2
++#define SCE_MUSIC_PLAYER_SERVICE_INIT_TYPE_3        3
++#define SCE_MUSIC_PLAYER_SERVICE_INIT_TYPE_4        4
++
++typedef struct SceMusicOpt {
++        int32_t unk_00; // usually set to -1
++        uint32_t unk_04;
++        uint32_t unk_08;
++        uint32_t unk_0C;
++} SceMusicOpt;
++
++typedef struct SceMusicStatus {
++        uint8_t unk_00[0x24];
++        uint32_t currentTimeMs;
++        uint8_t unk_28[0x18];
++} SceMusicStatus;
++
++typedef struct SceMusicInternalError {
++        int32_t ec1;
++        int32_t ec2;
++} SceMusicInternalError;
++
++typedef struct SceMusicPlayerServicePlayStatus {
++        int32_t unk_00;
++        int32_t internalError;
++        int32_t unk_08;
++} SceMusicPlayerServicePlayStatus;
++
++typedef struct SceMusicPlayerServicePlayStatusExtension {
++        int32_t unk_00;
++        int32_t unk_04;
++        int32_t unk_08;
++        int32_t unk_0C;
++        int32_t currentState;                // One of ::SceMusicCommand
++        int32_t unk_14;
++        int32_t bgmPortPriority;
++        int32_t unk_1C;
++        int32_t unk_20;
++        int32_t unk_24;
++        int32_t unk_28;
++        uint32_t currentTimeMs;
++        uint32_t durationMs;
++        uint32_t unk_34;
++        uint32_t unk_38;
++        uint32_t volume;
++        uint32_t shuffleMode;                // One of ::SceMusicShuffleMode
++        uint32_t repeatMode;                // One of ::SceMusicRepeatMode
++        uint32_t eqMode;                        // One of ::SceMusicEQMode
++        uint32_t alcMode;                        // One of ::SceMusicALCMode
++        char unk_50[0x20];
++} SceMusicPlayerServicePlayStatusExtension;
++
++typedef struct SceMusicPlayerServiceTrackInfo {
++        int32_t unk_00;
++        int32_t unk_04;
++        uint32_t durationMs;
++        char title[0x400];
++        char unk_40C[0x400];
++        char album[0x400];
++        char unk_C0C[0x400];
++        char artist[0x400];
++        char unk_140C[0x400];
++        int32_t unk_180C;
++} SceMusicPlayerServiceTrackInfo;
++
++typedef enum SceMusicCommand {
++        SCE_MUSIC_COMMAND_DEFAULT = 0,
++        SCE_MUSIC_COMMAND_PLAY = 0x1,
++        SCE_MUSIC_COMMAND_STOP = 0x2,
++        SCE_MUSIC_COMMAND_NEXT = 0x3,
++        SCE_MUSIC_COMMAND_PREVIOUS = 0x4,
++        SCE_MUSIC_COMMAND_SEEK = 0x11
++} SceMusicCommand;
++
++typedef enum SceMusicRepeatMode {
++        SCE_MUSIC_REPEAT_MODE_ALL,
++        SCE_MUSIC_REPEAT_MODE_ONE,
++        SCE_MUSIC_REPEAT_MODE_DISABLE
++} SceMusicRepeatMode;
++
++typedef enum SceMusicEQMode {
++        SCE_MUSIC_EQ_DISABLE,
++        SCE_MUSIC_EQ_HEAVY,
++        SCE_MUSIC_EQ_POP,
++        SCE_MUSIC_EQ_JAZZ,
++        SCE_MUSIC_EQ_UNIQUE
++} SceMusicEQMode;
++
++typedef enum SceMusicALCMode {
++        SCE_MUSIC_ALC_DISABLE,
++        SCE_MUSIC_ALC_ENABLE
++} SceMusicALCMode;
++
++typedef enum SceMusicShuffleMode {
++        SCE_MUSIC_SHUFFLE_DISABLE,
++        SCE_MUSIC_SHUFFLE_ENABLE,
++        SCE_MUSIC_SHUFFLE_UNK_2
++} SceMusicShuffleMode;
++
++PRX_INTERFACE int32_t sceMusicInternalAppInitialize();
++PRX_INTERFACE int32_t sceMusicInternalAppTerminate();
++PRX_INTERFACE int32_t sceMusicInternalAppSetUri(const char *path, SceMusicOpt *optParams);
++PRX_INTERFACE int32_t sceMusicInternalAppGetUri(char *dst, uint32_t maxlength);
++PRX_INTERFACE int32_t sceMusicInternalAppSetPlaybackCommand(uint32_t command, uint32_t fadeinFactor);
++PRX_INTERFACE int32_t sceMusicInternalAppGetStatus(SceMusicStatus *status);
++PRX_INTERFACE int32_t sceMusicInternalAppSetVolume(uint32_t volume);
++PRX_INTERFACE int32_t sceMusicInternalAppSetRepeatMode(uint32_t mode);
++PRX_INTERFACE int32_t sceMusicInternalAppSetShuffleMode(uint32_t mode);
++PRX_INTERFACE int32_t sceMusicInternalAppSetEQMode(uint32_t mode);
++PRX_INTERFACE int32_t sceMusicInternalAppSetALCMode(uint32_t mode);
++PRX_INTERFACE int32_t sceMusicInternalAppSetSegment(int32_t segmentStartMs, int32_t fromMs, int32_t toMs);
++PRX_INTERFACE int32_t sceMusicInternalAppGetInternalError(SceMusicInternalError *errors);
++PRX_INTERFACE int32_t sceMusicInternalAppSetUriExt(const char *path, SceMusicOpt *optParams, uint16_t extArg);
++PRX_INTERFACE int32_t sceMusicInternalAppGetInternalError2(SceMusicInternalError *errors);
++
++PRX_INTERFACE int32_t sceMusicPlayerServiceInitialize(uint32_t initType);
++PRX_INTERFACE int32_t sceMusicPlayerServiceTerminate();
++// SELECT mrid FROM tbl_Music WHERE license_type = 0 AND album_name_for_sort = X'FF' ORDER BY track_num , title_for_sort ASC
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetDbQuery(const char *query);
++PRX_INTERFACE int32_t sceMusicPlayerServiceGetDbQuery(char *dst, uint32_t maxlength);
++PRX_INTERFACE int32_t sceMusicPlayerServiceGetUri(char *dst, uint32_t maxlength);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetUri(const char *path, SceMusicOpt *optParams);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetPlaybackCommand(uint32_t command, uint32_t fadeinFactor);
++PRX_INTERFACE int32_t sceMusicPlayerServiceGetPlayStatusExtension(SceMusicPlayerServicePlayStatusExtension* infoBuffer);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetVolume(uint32_t volume);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetRepeatMode(uint32_t mode);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetShuffleMode(uint32_t mode);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetSeekTime(uint32_t seekTimeMs);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetSegment(int32_t segmentStartMs, int32_t fromMs, int32_t toMs);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetALCMode(uint32_t mode);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetEQMode(uint32_t mode);
++PRX_INTERFACE int32_t sceMusicPlayerServiceGetInternalError(SceMusicInternalError *errors);
++PRX_INTERFACE int32_t sceMusicPlayerServiceForbid(uint32_t param);
++PRX_INTERFACE int32_t sceMusicPlayerServicePermit();
++PRX_INTERFACE int32_t sceMusicPlayerServiceGetForbidStatus(uint32_t *status);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetDbQueryExt(const char *query, uint16_t extArg);
++PRX_INTERFACE int32_t sceMusicPlayerServiceSetUriExt(const char *path, SceMusicOpt *optParams, uint16_t extArg);
++PRX_INTERFACE int32_t sceMusicPlayerServiceGetPlayStatus(SceMusicPlayerServicePlayStatus *status);
++PRX_INTERFACE int32_t sceMusicPlayerServiceGetTrackInfo(SceMusicPlayerServiceTrackInfo *infoBuffer);
++
++PRX_INTERFACE int32_t sceMusicPlayerServiceLock();
++PRX_INTERFACE int32_t sceMusicPlayerServiceUnlock();
++
++#ifdef __cplusplus
++}
++#endif
+\ No newline at end of file
